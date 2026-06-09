@@ -84,9 +84,11 @@ public class Client {
             System.out.println("ping 1.1.1.1");
 
             Pointer currentSession = session;
-            Thread rxThread = new Thread(() -> rxLoop(currentSession), "http-rx-to-tun");
-            rxThread.setDaemon(true);
-            rxThread.start();
+            for (int i = 0; i < 4; i++) {
+                Thread rxThread = new Thread(() -> rxLoop(currentSession), "http-rx-to-tun-" + i);
+                rxThread.setDaemon(true);
+                rxThread.start();
+            }
 
             tunToHttpTx(session);
 
