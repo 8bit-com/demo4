@@ -25,6 +25,8 @@ public class Client {
 
     private static final int WINTUN_RING_CAPACITY = 0x400000;
 
+    private long requestId = 0;
+
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3))
             .build();
@@ -142,8 +144,10 @@ public class Client {
         long start = System.nanoTime();
 
         try {
+            ++requestId;
+
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(SERVER_URL + "/packet"))
+                    .uri(URI.create(SERVER_URL + "/packet?id=" + requestId))
                     .timeout(Duration.ofSeconds(3))
                     .header("Content-Type", "application/octet-stream")
                     .POST(HttpRequest.BodyPublishers.ofByteArray(packet))
@@ -158,12 +162,7 @@ public class Client {
 
             int code = response.statusCode();
 
-            System.out.println(
-                    "HTTP STATUS " + code +
-                            " build=" + ms(start, beforeSend) + "ms" +
-                            " send=" + ms(beforeSend, afterSend) + "ms" +
-                            " body=" + response.body().length
-            );
+            System.out.println("HTTP STATUS id=" + requestId + " " + code + " send=" + ms(beforeSend, afterSend) + "ms");
 
             if (code == 200) {
                 return response.body();
@@ -174,12 +173,7 @@ public class Client {
         } catch (Exception e) {
             long errorTime = System.nanoTime();
 
-            System.out.println(
-                    "HTTP ERROR after " +
-                            ms(start, errorTime) +
-                            "ms: " +
-                            e.getMessage()
-            );
+            System.out.println("HTTP ERROR id=" + requestId + " after " + ms(start, errorTime) + "ms: " + e.getMessage());
 
             return null;
         }
