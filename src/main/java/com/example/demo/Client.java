@@ -28,7 +28,7 @@ public class Client {
 
     private static final int WINTUN_RING_CAPACITY = 0x400000;
 
-    private final ExecutorService httpWorkers = Executors.newFixedThreadPool(4);
+    private final ExecutorService httpWorkers = Executors.newFixedThreadPool(8);
     private final AtomicLong requestCounter = new AtomicLong();
 
     @EventListener(ApplicationReadyEvent.class)
@@ -80,6 +80,7 @@ public class Client {
             System.out.println("Session started");
             System.out.println("Run:");
             System.out.println("ping 10.8.0.1");
+            System.out.println("ping 1.1.1.1");
 
             tunToHttpPacket(session);
 
@@ -118,10 +119,6 @@ public class Client {
             }
 
             if (!isIpv4(data)) {
-                continue;
-            }
-
-            if (!isIcmp(data)) {
                 continue;
             }
 
@@ -227,10 +224,6 @@ public class Client {
 
     private boolean isIpv4(byte[] packet) {
         return packet.length >= 20 && ((packet[0] >> 4) & 0x0F) == 4;
-    }
-
-    private boolean isIcmp(byte[] packet) {
-        return packet.length >= 20 && (packet[9] & 0xFF) == 1;
     }
 
     private String ipInfo(byte[] packet) {
