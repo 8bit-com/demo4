@@ -12,6 +12,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class Client {
@@ -25,11 +28,13 @@ public class Client {
 
     private static final int WINTUN_RING_CAPACITY = 0x400000;
 
-    private long requestId = 0;
-
     private final HttpClient httpClient = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(3))
             .build();
+
+    private final ExecutorService httpWorkers = Executors.newFixedThreadPool(4);
+    private final AtomicLong requestCounter = new AtomicLong();
 
     @EventListener(ApplicationReadyEvent.class)
     public void run() throws Exception {
@@ -38,7 +43,10 @@ public class Client {
                 new RouteManager(ADAPTER_NAME, ADAPTER_IP, SERVER_IP);
 
         Runtime.getRuntime().addShutdownHook(
-                new Thread(routeManager::stop)
+                new Thread(() -> {
+                    httpWorkers.shutdownNow();
+                    routeManager.stop();
+                })
         );
 
         Pointer adapter = null;
@@ -81,6 +89,7 @@ public class Client {
             tunToHttpPacket(session);
 
         } finally {
+            httpWorkers.shutdownNow();
             routeManager.stop();
 
             if (session != null) {
@@ -121,33 +130,37 @@ public class Client {
                 continue;
             }
 
-            System.out.println("TUN -> HTTP " + data.length + " bytes " + ipInfo(data));
+            long id = requestCounter.incrementAndGet();
+            System.out.println("TUN -> HTTP id=" + id + " " + data.length + " bytes " + ipInfo(data));
 
-            byte[] response = sendPacketToServer(data);
+            byte[] requestPacket = data;
 
-            if (response == null) {
-                continue;
-            }
+            httpWorkers.submit(() -> {
+                byte[] response = sendPacketToServer(id, requestPacket);
 
-            if (!isIpv4(response)) {
-                continue;
-            }
+                if (response == null) {
+                    return;
+                }
 
-            System.out.println("HTTP -> TUN " + response.length + " bytes " + ipInfo(response));
+                if (!isIpv4(response)) {
+                    return;
+                }
 
-            writeToTun(session, response);
+                System.out.println("HTTP -> TUN id=" + id + " " + response.length + " bytes " + ipInfo(response));
+
+                writeToTun(session, response, id);
+            });
         }
     }
 
-    private byte[] sendPacketToServer(byte[] packet) {
+    private byte[] sendPacketToServer(long id, byte[] packet) {
 
         long start = System.nanoTime();
 
         try {
-            ++requestId;
-
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(SERVER_URL + "/packet?id=" + requestId))
+                    .uri(URI.create(SERVER_URL + "/packet?id=" + id))
+                    .version(HttpClient.Version.HTTP_1_1)
                     .timeout(Duration.ofSeconds(3))
                     .header("Content-Type", "application/octet-stream")
                     .POST(HttpRequest.BodyPublishers.ofByteArray(packet))
@@ -162,7 +175,12 @@ public class Client {
 
             int code = response.statusCode();
 
-            System.out.println("HTTP STATUS id=" + requestId + " " + code + " send=" + ms(beforeSend, afterSend) + "ms");
+            System.out.println(
+                    "HTTP STATUS id=" + id + " " + code +
+                            " build=" + ms(start, beforeSend) + "ms" +
+                            " send=" + ms(beforeSend, afterSend) + "ms" +
+                            " body=" + response.body().length
+            );
 
             if (code == 200) {
                 return response.body();
@@ -173,7 +191,12 @@ public class Client {
         } catch (Exception e) {
             long errorTime = System.nanoTime();
 
-            System.out.println("HTTP ERROR id=" + requestId + " after " + ms(start, errorTime) + "ms: " + e.getMessage());
+            System.out.println(
+                    "HTTP ERROR id=" + id + " after " +
+                            ms(start, errorTime) +
+                            "ms: " +
+                            e.getMessage()
+            );
 
             return null;
         }
@@ -183,7 +206,7 @@ public class Client {
         return (to - from) / 1_000_000;
     }
 
-    private void writeToTun(Pointer session, byte[] data) {
+    private void writeToTun(Pointer session, byte[] data, long id) {
 
         Pointer sendPacket = Wintun.INSTANCE.WintunAllocateSendPacket(
                 session,
@@ -191,7 +214,7 @@ public class Client {
         );
 
         if (sendPacket == null) {
-            System.out.println("Cannot allocate Wintun send packet");
+            System.out.println("Cannot allocate Wintun send packet id=" + id);
             return;
         }
 
@@ -199,7 +222,7 @@ public class Client {
 
         Wintun.INSTANCE.WintunSendPacket(session, sendPacket);
 
-        System.out.println("WRITTEN TO WINTUN " + data.length + " bytes " + ipInfo(data));
+        System.out.println("WRITTEN TO WINTUN id=" + id + " " + data.length + " bytes " + ipInfo(data));
     }
 
     private boolean isIpv4(byte[] packet) {
