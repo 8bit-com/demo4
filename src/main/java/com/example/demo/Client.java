@@ -28,9 +28,10 @@ public class Client {
 
     private static final int WINTUN_RING_CAPACITY = 0x400000;
 
-    private final ExecutorService txWorkers = Executors.newFixedThreadPool(8);
+    private final ExecutorService txWorkers = Executors.newFixedThreadPool(20);
     private final AtomicLong txCounter = new AtomicLong();
     private final AtomicLong rxCounter = new AtomicLong();
+
 
     @EventListener(ApplicationReadyEvent.class)
     public void run() throws Exception {
@@ -84,7 +85,7 @@ public class Client {
             System.out.println("ping 1.1.1.1");
 
             Pointer currentSession = session;
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 20; i++) {
                 Thread rxThread = new Thread(() -> rxLoop(currentSession), "http-rx-to-tun-" + i);
                 rxThread.setDaemon(true);
                 rxThread.start();
@@ -131,7 +132,7 @@ public class Client {
             }
 
             long id = txCounter.incrementAndGet();
-            System.out.println("TUN -> TX id=" + id + " " + data.length + " bytes " + ipInfo(data));
+            //System.out.println("TUN -> TX id=" + id + " " + data.length + " bytes " + ipInfo(data));
 
             byte[] requestPacket = data;
 
@@ -146,18 +147,18 @@ public class Client {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(SERVER_URL + "/tx"))
                     .version(HttpClient.Version.HTTP_1_1)
-                    .timeout(Duration.ofSeconds(3))
+                    .timeout(Duration.ofSeconds(50))
                     .header("Content-Type", "application/octet-stream")
                     .POST(HttpRequest.BodyPublishers.ofByteArray(packet))
                     .build();
 
-            HttpClient httpClient = HttpClient.newBuilder()
+            HttpClient httpClient2 = HttpClient.newBuilder()
                     .version(HttpClient.Version.HTTP_1_1)
-                    .connectTimeout(Duration.ofSeconds(3))
+                    .connectTimeout(Duration.ofSeconds(50))
                     .build();
 
             HttpResponse<Void> response =
-                    httpClient.send(request, HttpResponse.BodyHandlers.discarding());
+                    httpClient2.send(request, HttpResponse.BodyHandlers.discarding());
 
             int code = response.statusCode();
             if (code != 204 && code != 200) {
@@ -175,13 +176,13 @@ public class Client {
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create(SERVER_URL + "/rx"))
                         .version(HttpClient.Version.HTTP_1_1)
-                        .timeout(Duration.ofSeconds(35))
+                        .timeout(Duration.ofSeconds(50))
                         .GET()
                         .build();
 
                 HttpClient httpClient = HttpClient.newBuilder()
                         .version(HttpClient.Version.HTTP_1_1)
-                        .connectTimeout(Duration.ofSeconds(3))
+                        .connectTimeout(Duration.ofSeconds(50))
                         .build();
 
                 HttpResponse<byte[]> response =
@@ -193,7 +194,7 @@ public class Client {
 
                 if (response.statusCode() != 200) {
                     System.out.println("RX STATUS " + response.statusCode());
-                    Thread.sleep(100);
+                    Thread.sleep(1);
                     continue;
                 }
 
@@ -203,13 +204,13 @@ public class Client {
                 }
 
                 long id = rxCounter.incrementAndGet();
-                System.out.println("RX -> TUN id=" + id + " " + packet.length + " bytes " + ipInfo(packet));
+                //System.out.println("RX -> TUN id=" + id + " " + packet.length + " bytes " + ipInfo(packet));
                 writeToTun(session, packet, id);
 
             } catch (Exception e) {
                 System.out.println("RX ERROR: " + e.getMessage());
                 try {
-                    Thread.sleep(300);
+                    Thread.sleep(10);
                 } catch (InterruptedException interruptedException) {
                     Thread.currentThread().interrupt();
                     return;
@@ -238,7 +239,7 @@ public class Client {
 
         Wintun.INSTANCE.WintunSendPacket(session, sendPacket);
 
-        System.out.println("WRITTEN TO WINTUN id=" + id + " " + data.length + " bytes " + ipInfo(data));
+        //System.out.println("WRITTEN TO WINTUN id=" + id + " " + data.length + " bytes " + ipInfo(data));
     }
 
     private boolean isIpv4(byte[] packet) {

@@ -59,6 +59,12 @@ public class RouteManager {
                         " metric 1"
         );
 
+        runCmd(
+                "netsh interface ipv4 set subinterface " +
+                        "\"" + adapterName + "\" " +
+                        "mtu=1400 store=active"
+        );
+
         List<String> ips = resolveVpnIps();
         if (ips.isEmpty()) {
             throw new RuntimeException("Не удалось получить IPv4 для ChatGPT/OpenAI доменов");
