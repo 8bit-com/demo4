@@ -28,11 +28,6 @@ public class Client {
 
     private static final int WINTUN_RING_CAPACITY = 0x400000;
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_1_1)
-            .connectTimeout(Duration.ofSeconds(3))
-            .build();
-
     private final ExecutorService httpWorkers = Executors.newFixedThreadPool(4);
     private final AtomicLong requestCounter = new AtomicLong();
 
@@ -167,6 +162,11 @@ public class Client {
                     .build();
 
             long beforeSend = System.nanoTime();
+
+            HttpClient httpClient = HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .connectTimeout(Duration.ofSeconds(3))
+                    .build();
 
             HttpResponse<byte[]> response =
                     httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
