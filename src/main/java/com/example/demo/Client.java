@@ -28,8 +28,9 @@ public class Client {
 
     private static final int WINTUN_RING_CAPACITY = 0x400000;
 
-    private final ExecutorService httpWorkers = Executors.newFixedThreadPool(8);
-    private final AtomicLong requestCounter = new AtomicLong();
+    private final ExecutorService txWorkers = Executors.newFixedThreadPool(8);
+    private final AtomicLong txCounter = new AtomicLong();
+    private final AtomicLong rxCounter = new AtomicLong();
 
     @EventListener(ApplicationReadyEvent.class)
     public void run() throws Exception {
@@ -39,7 +40,7 @@ public class Client {
 
         Runtime.getRuntime().addShutdownHook(
                 new Thread(() -> {
-                    httpWorkers.shutdownNow();
+                    txWorkers.shutdownNow();
                     routeManager.stop();
                 })
         );
@@ -82,10 +83,15 @@ public class Client {
             System.out.println("ping 10.8.0.1");
             System.out.println("ping 1.1.1.1");
 
-            tunToHttpPacket(session);
+            Pointer currentSession = session;
+            Thread rxThread = new Thread(() -> rxLoop(currentSession), "http-rx-to-tun");
+            rxThread.setDaemon(true);
+            rxThread.start();
+
+            tunToHttpTx(session);
 
         } finally {
-            httpWorkers.shutdownNow();
+            txWorkers.shutdownNow();
             routeManager.stop();
 
             if (session != null) {
@@ -98,7 +104,7 @@ public class Client {
         }
     }
 
-    private void tunToHttpPacket(Pointer session) throws Exception {
+    private void tunToHttpTx(Pointer session) throws Exception {
 
         while (true) {
             IntByReference size = new IntByReference();
@@ -122,80 +128,91 @@ public class Client {
                 continue;
             }
 
-            long id = requestCounter.incrementAndGet();
-            System.out.println("TUN -> HTTP id=" + id + " " + data.length + " bytes " + ipInfo(data));
+            long id = txCounter.incrementAndGet();
+            System.out.println("TUN -> TX id=" + id + " " + data.length + " bytes " + ipInfo(data));
 
             byte[] requestPacket = data;
 
-            httpWorkers.submit(() -> {
-                byte[] response = sendPacketToServer(id, requestPacket);
-
-                if (response == null) {
-                    return;
-                }
-
-                if (!isIpv4(response)) {
-                    return;
-                }
-
-                System.out.println("HTTP -> TUN id=" + id + " " + response.length + " bytes " + ipInfo(response));
-
-                writeToTun(session, response, id);
-            });
+            txWorkers.submit(() -> sendPacketToServerTx(id, requestPacket));
         }
     }
 
-    private byte[] sendPacketToServer(long id, byte[] packet) {
-
+    private void sendPacketToServerTx(long id, byte[] packet) {
         long start = System.nanoTime();
 
         try {
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(SERVER_URL + "/packet?id=" + id))
+                    .uri(URI.create(SERVER_URL + "/tx"))
                     .version(HttpClient.Version.HTTP_1_1)
                     .timeout(Duration.ofSeconds(3))
                     .header("Content-Type", "application/octet-stream")
                     .POST(HttpRequest.BodyPublishers.ofByteArray(packet))
                     .build();
 
-            long beforeSend = System.nanoTime();
-
             HttpClient httpClient = HttpClient.newBuilder()
                     .version(HttpClient.Version.HTTP_1_1)
                     .connectTimeout(Duration.ofSeconds(3))
                     .build();
 
-            HttpResponse<byte[]> response =
-                    httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-
-            long afterSend = System.nanoTime();
+            HttpResponse<Void> response =
+                    httpClient.send(request, HttpResponse.BodyHandlers.discarding());
 
             int code = response.statusCode();
-
-            System.out.println(
-                    "HTTP STATUS id=" + id + " " + code +
-                            " build=" + ms(start, beforeSend) + "ms" +
-                            " send=" + ms(beforeSend, afterSend) + "ms" +
-                            " body=" + response.body().length
-            );
-
-            if (code == 200) {
-                return response.body();
+            if (code != 204 && code != 200) {
+                System.out.println("TX STATUS id=" + id + " " + code + " after " + ms(start, System.nanoTime()) + "ms");
             }
 
-            return null;
-
         } catch (Exception e) {
-            long errorTime = System.nanoTime();
+            System.out.println("TX ERROR id=" + id + " after " + ms(start, System.nanoTime()) + "ms: " + e.getMessage());
+        }
+    }
 
-            System.out.println(
-                    "HTTP ERROR id=" + id + " after " +
-                            ms(start, errorTime) +
-                            "ms: " +
-                            e.getMessage()
-            );
+    private void rxLoop(Pointer session) {
+        while (true) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(SERVER_URL + "/rx"))
+                        .version(HttpClient.Version.HTTP_1_1)
+                        .timeout(Duration.ofSeconds(35))
+                        .GET()
+                        .build();
 
-            return null;
+                HttpClient httpClient = HttpClient.newBuilder()
+                        .version(HttpClient.Version.HTTP_1_1)
+                        .connectTimeout(Duration.ofSeconds(3))
+                        .build();
+
+                HttpResponse<byte[]> response =
+                        httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+
+                if (response.statusCode() == 204) {
+                    continue;
+                }
+
+                if (response.statusCode() != 200) {
+                    System.out.println("RX STATUS " + response.statusCode());
+                    Thread.sleep(100);
+                    continue;
+                }
+
+                byte[] packet = response.body();
+                if (!isIpv4(packet)) {
+                    continue;
+                }
+
+                long id = rxCounter.incrementAndGet();
+                System.out.println("RX -> TUN id=" + id + " " + packet.length + " bytes " + ipInfo(packet));
+                writeToTun(session, packet, id);
+
+            } catch (Exception e) {
+                System.out.println("RX ERROR: " + e.getMessage());
+                try {
+                    Thread.sleep(300);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
         }
     }
 
