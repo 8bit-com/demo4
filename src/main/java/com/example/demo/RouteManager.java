@@ -49,7 +49,7 @@ public class RouteManager {
         runCmd("netsh interface ipv4 set address name=" + interfaceIndex + " static " + adapterIp + " 255.255.255.255");
         runCmdIgnoreError("route delete " + serverIp);
         runCmd("route add " + serverIp + " mask 255.255.255.255 " + defaultGateway + " metric 1");
-        runCmd("netsh interface ipv4 set subinterface " + interfaceIndex + " mtu=1400 store=active");
+        runCmd("netsh interface ipv4 set subinterface " + interfaceIndex + " mtu=1200 store=active");
 
         List<String> ips = resolveVpnIps();
         if (ips.isEmpty()) {
