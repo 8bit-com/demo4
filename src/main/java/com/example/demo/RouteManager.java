@@ -46,7 +46,7 @@ public class RouteManager {
 
         System.out.println("WINTUN ROUTE INTERFACE INDEX: " + interfaceIndex);
 
-        runCmd("netsh interface ipv4 set address interface=" + interfaceIndex + " static " + adapterIp + " 255.255.255.255");
+        runCmd("netsh interface ipv4 set address name=" + interfaceIndex + " static " + adapterIp + " 255.255.255.255");
         runCmdIgnoreError("route delete " + serverIp);
         runCmd("route add " + serverIp + " mask 255.255.255.255 " + defaultGateway + " metric 1");
         runCmd("netsh interface ipv4 set subinterface " + interfaceIndex + " mtu=1400 store=active");
