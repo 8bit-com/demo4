@@ -62,14 +62,15 @@ public class Client {
 
             System.out.println("Adapter ready: " + ADAPTER_NAME);
 
-            routeManager.start();
-
             session = Wintun.INSTANCE.WintunStartSession(adapter, WINTUN_RING_CAPACITY);
             if (session == null) {
                 throw new RuntimeException("Cannot start Wintun session");
             }
 
             System.out.println("Session started");
+
+            routeManager.start();
+
             System.out.println("WS URL: " + SERVER_WS_URL);
 
             Pointer currentSession = session;
