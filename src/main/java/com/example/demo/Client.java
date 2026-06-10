@@ -45,6 +45,12 @@ public class Client {
         Pointer session = null;
         WebSocketClient wsClient = null;
 
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(() -> {
+                    routeManager.stop();
+                })
+        );
+
         try {
             adapter = Wintun.INSTANCE.WintunCreateAdapter(
                     new WString(ADAPTER_NAME),
