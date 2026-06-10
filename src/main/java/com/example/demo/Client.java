@@ -13,6 +13,7 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Service
@@ -27,9 +28,12 @@ public class Client {
 
     private static final int WINTUN_RING_CAPACITY = 0x400000;
     private static final int MAX_PACKET_SIZE = 65535;
+    private static final long LOG_FIRST_PACKETS = 30;
+    private static final long LOG_EVERY_PACKETS = 500;
 
     private final AtomicLong txCounter = new AtomicLong();
     private final AtomicLong rxCounter = new AtomicLong();
+    private final AtomicBoolean wsClosed = new AtomicBoolean(false);
 
     @EventListener(ApplicationReadyEvent.class)
     public void run() throws Exception {
@@ -65,6 +69,7 @@ public class Client {
             }
 
             System.out.println("Session started");
+            System.out.println("WS URL: " + SERVER_WS_URL);
 
             Pointer currentSession = session;
             CountDownLatch connected = new CountDownLatch(1);
@@ -78,6 +83,7 @@ public class Client {
 
                 @Override
                 public void onMessage(String message) {
+                    System.out.println("WS text ignored: " + message);
                 }
 
                 @Override
@@ -86,21 +92,25 @@ public class Client {
                     bytes.get(packet);
 
                     if (!isIpv4(packet)) {
+                        System.out.println("WS -> TUN skip non-ipv4 len=" + packet.length);
                         return;
                     }
 
                     long id = rxCounter.incrementAndGet();
+                    logPacket("WS -> TUN", id, packet);
                     writeToTun(currentSession, packet, id);
                 }
 
                 @Override
                 public void onClose(int code, String reason, boolean remote) {
-                    System.out.println("WS closed: " + code + " " + reason);
+                    wsClosed.set(true);
+                    System.out.println("WS closed: code=" + code + " remote=" + remote + " reason=" + reason);
                 }
 
                 @Override
                 public void onError(Exception ex) {
-                    System.out.println("WS error: " + ex.getMessage());
+                    System.out.println("WS error: " + ex.getClass().getName() + ": " + ex.getMessage());
+                    ex.printStackTrace();
                 }
             };
 
@@ -130,6 +140,10 @@ public class Client {
 
     private void tunToWs(Pointer session, WebSocketClient wsClient) throws Exception {
         while (true) {
+            if (wsClosed.get()) {
+                throw new RuntimeException("WebSocket closed");
+            }
+
             IntByReference size = new IntByReference();
             Pointer packet = Wintun.INSTANCE.WintunReceivePacket(session, size);
 
@@ -146,15 +160,16 @@ public class Client {
             }
 
             if (!isIpv4(data) || data.length > MAX_PACKET_SIZE) {
+                System.out.println("TUN -> WS skip invalid packet len=" + data.length);
                 continue;
             }
 
             if (!wsClient.isOpen()) {
-                Thread.sleep(10);
-                continue;
+                throw new RuntimeException("WebSocket is not open");
             }
 
-            txCounter.incrementAndGet();
+            long id = txCounter.incrementAndGet();
+            logPacket("TUN -> WS", id, data);
             wsClient.send(data);
         }
     }
@@ -171,7 +186,28 @@ public class Client {
         Wintun.INSTANCE.WintunSendPacket(session, sendPacket);
     }
 
+    private void logPacket(String direction, long id, byte[] packet) {
+        if (id <= LOG_FIRST_PACKETS || id % LOG_EVERY_PACKETS == 0) {
+            System.out.println(direction + " id=" + id + " len=" + packet.length + " " + ipInfo(packet));
+        }
+    }
+
     private boolean isIpv4(byte[] packet) {
         return packet.length >= 20 && ((packet[0] >> 4) & 0x0F) == 4;
+    }
+
+    private String ipInfo(byte[] packet) {
+        if (packet.length < 20) {
+            return "";
+        }
+
+        return ip(packet, 12) + " -> " + ip(packet, 16) + " proto=" + (packet[9] & 0xff);
+    }
+
+    private String ip(byte[] data, int offset) {
+        return (data[offset] & 0xff) + "." +
+                (data[offset + 1] & 0xff) + "." +
+                (data[offset + 2] & 0xff) + "." +
+                (data[offset + 3] & 0xff);
     }
 }
