@@ -13,6 +13,8 @@ public class RouteManager {
     private final String serverIp;
 
     private String defaultGateway;
+    private String defaultInterfaceIp;
+    private int defaultMetric;
     private int interfaceIndex;
 
     public RouteManager(String adapterName, String adapterIp, String serverIp) {
@@ -22,12 +24,16 @@ public class RouteManager {
     }
 
     public void start() throws Exception {
-        defaultGateway = findDefaultGateway();
+        DefaultRoute defaultRoute = findDefaultRoute();
+        defaultGateway = defaultRoute.gateway;
+        defaultInterfaceIp = defaultRoute.interfaceIp;
+        defaultMetric = defaultRoute.metric;
         interfaceIndex = findWintunInterfaceIndex();
 
         cleanupRoutesOnly();
 
         System.out.println("WINTUN ROUTE INTERFACE INDEX: " + interfaceIndex);
+        System.out.println("ORIGINAL DEFAULT ROUTE: 0.0.0.0/0 via " + defaultGateway + " interface " + defaultInterfaceIp + " metric " + defaultMetric);
 
         runCmd("netsh interface ipv4 set address name=" + interfaceIndex + " static " + adapterIp + " 255.255.255.255");
         runCmdIgnoreError("route delete " + serverIp);
@@ -42,6 +48,7 @@ public class RouteManager {
 
     public void stop() {
         cleanupRoutesOnly();
+        restoreDefaultRoute();
     }
 
     private void addDefaultVpnRoute(String network, String mask) throws Exception {
@@ -61,11 +68,21 @@ public class RouteManager {
         runCmdIgnoreError("route delete " + serverIp);
     }
 
-    private String findDefaultGateway() throws Exception {
+    private void restoreDefaultRoute() {
+        if (defaultGateway == null || defaultInterfaceIp == null) {
+            return;
+        }
+
+        runCmdIgnoreError("route delete 0.0.0.0");
+        runCmdIgnoreError("route add 0.0.0.0 mask 0.0.0.0 " + defaultGateway + " metric " + defaultMetric + " if " + defaultInterfaceIp);
+        runCmdIgnoreError("route print -4");
+    }
+
+    private DefaultRoute findDefaultRoute() throws Exception {
         String output = runCmd("route print -4");
 
         Pattern pattern = Pattern.compile(
-                "^\\s*0\\.0\\.0\\.0\\s+0\\.0\\.0\\.0\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+\\d+\\s*$",
+                "^\\s*0\\.0\\.0\\.0\\s+0\\.0\\.0\\.0\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+(\\d+)\\s*$",
                 Pattern.MULTILINE
         );
 
@@ -74,7 +91,7 @@ public class RouteManager {
             throw new RuntimeException("Не найден обычный default gateway");
         }
 
-        return matcher.group(1);
+        return new DefaultRoute(matcher.group(1), matcher.group(2), Integer.parseInt(matcher.group(3)));
     }
 
     private int findWintunInterfaceIndex() throws Exception {
@@ -120,6 +137,18 @@ public class RouteManager {
         try {
             runCmd(command);
         } catch (Exception ignored) {
+        }
+    }
+
+    private static class DefaultRoute {
+        private final String gateway;
+        private final String interfaceIp;
+        private final int metric;
+
+        private DefaultRoute(String gateway, String interfaceIp, int metric) {
+            this.gateway = gateway;
+            this.interfaceIp = interfaceIp;
+            this.metric = metric;
         }
     }
 }
