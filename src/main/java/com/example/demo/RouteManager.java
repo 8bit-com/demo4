@@ -29,7 +29,6 @@ public class RouteManager {
     private final String serverIp;
 
     private String defaultGateway;
-    private int adapterIndex;
     private final Set<String> routedIps = new LinkedHashSet<>();
 
     public RouteManager(String adapterName, String adapterIp, String serverIp) {
@@ -50,9 +49,6 @@ public class RouteManager {
                         adapterIp + " " +
                         "255.255.255.255"
         );
-
-        adapterIndex = findAdapterIndex();
-        System.out.println("VPN ADAPTER INDEX: " + adapterIndex);
 
         runCmdIgnoreError("route delete " + serverIp);
 
@@ -107,31 +103,22 @@ public class RouteManager {
     }
 
     private void addVpnRoute(String ip) throws Exception {
-        deleteVpnRoute(ip);
-
-        runCmd(
-                "route add " + ip +
-                        " mask 255.255.255.255 0.0.0.0" +
-                        " metric 1 if " + adapterIndex
-        );
-
-        routedIps.add(ip);
-    }
-
-    private void deleteVpnRoute(String ip) {
-        runCmdIgnoreError("route delete " + ip);
         runCmdIgnoreError(
                 "netsh interface ipv4 delete route " +
                         "prefix=" + ip + "/32 " +
                         "interface=\"" + adapterName + "\""
         );
-        if (adapterIndex > 0) {
-            runCmdIgnoreError(
-                    "netsh interface ipv4 delete route " +
-                            "prefix=" + ip + "/32 " +
-                            "interface=" + adapterIndex
-            );
-        }
+
+        runCmd(
+                "netsh interface ipv4 add route " +
+                        "prefix=" + ip + "/32 " +
+                        "interface=\"" + adapterName + "\" " +
+                        "nexthop=0.0.0.0 " +
+                        "metric=1 " +
+                        "store=active"
+        );
+
+        routedIps.add(ip);
     }
 
     private void cleanupRoutesOnly() {
@@ -148,12 +135,20 @@ public class RouteManager {
         );
 
         for (String ip : routedIps) {
-            deleteVpnRoute(ip);
+            runCmdIgnoreError(
+                    "netsh interface ipv4 delete route " +
+                            "prefix=" + ip + "/32 " +
+                            "interface=\"" + adapterName + "\""
+            );
         }
         routedIps.clear();
 
         for (String domainIp : resolveVpnIpsQuietly()) {
-            deleteVpnRoute(domainIp);
+            runCmdIgnoreError(
+                    "netsh interface ipv4 delete route " +
+                            "prefix=" + domainIp + "/32 " +
+                            "interface=\"" + adapterName + "\""
+            );
         }
 
         runCmdIgnoreError("route delete " + serverIp);
@@ -192,24 +187,6 @@ public class RouteManager {
         }
 
         return matcher.group(1);
-    }
-
-    private int findAdapterIndex() throws Exception {
-        String output = runCmd("netsh interface ipv4 show interfaces");
-
-        Pattern byName = Pattern.compile("^\\s*(\\d+)\\s+\\d+\\s+\\d+\\s+\\S+\\s+\\S+\\s+" + Pattern.quote(adapterName) + "\\s*$", Pattern.MULTILINE);
-        Matcher byNameMatcher = byName.matcher(output);
-        if (byNameMatcher.find()) {
-            return Integer.parseInt(byNameMatcher.group(1));
-        }
-
-        Pattern vpn = Pattern.compile("^\\s*(\\d+)\\s+\\d+\\s+\\d+\\s+\\S+\\s+\\S+\\s+.*VPN.*$", Pattern.MULTILINE | Pattern.CASE_INSENSITIVE);
-        Matcher vpnMatcher = vpn.matcher(output);
-        if (vpnMatcher.find()) {
-            return Integer.parseInt(vpnMatcher.group(1));
-        }
-
-        throw new RuntimeException("Не найден индекс VPN интерфейса");
     }
 
     private String runCmd(String command) throws Exception {
