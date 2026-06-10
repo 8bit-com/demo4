@@ -34,6 +34,7 @@ public class Client {
 
     private final AtomicLong txCounter = new AtomicLong();
     private final AtomicLong rxCounter = new AtomicLong();
+    private final AtomicLong dropCounter = new AtomicLong();
     private final AtomicBoolean wsClosed = new AtomicBoolean(false);
 
     @EventListener(ApplicationReadyEvent.class)
@@ -45,11 +46,7 @@ public class Client {
         Pointer session = null;
         WebSocketClient wsClient = null;
 
-        Runtime.getRuntime().addShutdownHook(
-                new Thread(() -> {
-                    routeManager.stop();
-                })
-        );
+        Runtime.getRuntime().addShutdownHook(new Thread(routeManager::stop));
 
         try {
             adapter = Wintun.INSTANCE.WintunCreateAdapter(
@@ -170,7 +167,18 @@ public class Client {
             data = normalizeWintunPacket(data);
 
             if (!isIpv4(data) || data.length > MAX_PACKET_SIZE) {
-                System.out.println("TUN -> WS skip invalid packet len=" + data.length + " first=" + firstBytes(data));
+                long id = dropCounter.incrementAndGet();
+                if (id <= LOG_FIRST_PACKETS || id % LOG_EVERY_PACKETS == 0) {
+                    System.out.println("TUN -> WS drop invalid id=" + id + " len=" + data.length + " first=" + firstBytes(data));
+                }
+                continue;
+            }
+
+            if (!shouldTunnel(data)) {
+                long id = dropCounter.incrementAndGet();
+                if (id <= LOG_FIRST_PACKETS || id % LOG_EVERY_PACKETS == 0) {
+                    System.out.println("TUN -> WS drop local id=" + id + " len=" + data.length + " " + ipInfo(data));
+                }
                 continue;
             }
 
@@ -182,6 +190,29 @@ public class Client {
             logPacket("TUN -> WS", id, data);
             wsClient.send(data);
         }
+    }
+
+    private boolean shouldTunnel(byte[] packet) {
+        int d0 = packet[16] & 0xff;
+        int d1 = packet[17] & 0xff;
+
+        if (d0 == 0 || d0 == 10 || d0 == 127 || d0 >= 224) {
+            return false;
+        }
+
+        if (d0 == 169 && d1 == 254) {
+            return false;
+        }
+
+        if (d0 == 172 && d1 >= 16 && d1 <= 31) {
+            return false;
+        }
+
+        if (d0 == 192 && d1 == 168) {
+            return false;
+        }
+
+        return true;
     }
 
     private byte[] normalizeWintunPacket(byte[] data) {
