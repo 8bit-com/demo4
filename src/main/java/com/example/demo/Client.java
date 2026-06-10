@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Service
 public class Client {
@@ -35,7 +36,8 @@ public class Client {
     private final AtomicLong txCounter = new AtomicLong();
     private final AtomicLong rxCounter = new AtomicLong();
     private final AtomicLong dropCounter = new AtomicLong();
-    private final AtomicBoolean wsClosed = new AtomicBoolean(false);
+    private final AtomicBoolean running = new AtomicBoolean(true);
+    private final AtomicReference<WebSocketClient> wsRef = new AtomicReference<>();
 
     @EventListener(ApplicationReadyEvent.class)
     public void run() throws Exception {
@@ -44,9 +46,15 @@ public class Client {
 
         Pointer adapter = null;
         Pointer session = null;
-        WebSocketClient wsClient = null;
 
-        Runtime.getRuntime().addShutdownHook(new Thread(routeManager::stop));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            running.set(false);
+            WebSocketClient ws = wsRef.get();
+            if (ws != null) {
+                ws.close();
+            }
+            routeManager.stop();
+        }));
 
         try {
             adapter = Wintun.INSTANCE.WintunCreateAdapter(
@@ -77,58 +85,15 @@ public class Client {
             System.out.println("WS URL: " + SERVER_WS_URL);
 
             Pointer currentSession = session;
-            CountDownLatch connected = new CountDownLatch(1);
-
-            wsClient = new WebSocketClient(new URI(SERVER_WS_URL)) {
-                @Override
-                public void onOpen(ServerHandshake handshake) {
-                    System.out.println("WS connected");
-                    connected.countDown();
-                }
-
-                @Override
-                public void onMessage(String message) {
-                    System.out.println("WS text ignored: " + message);
-                }
-
-                @Override
-                public void onMessage(ByteBuffer bytes) {
-                    byte[] packet = new byte[bytes.remaining()];
-                    bytes.get(packet);
-
-                    if (!isIpv4(packet)) {
-                        System.out.println("WS -> TUN skip non-ipv4 len=" + packet.length + " first=" + firstBytes(packet));
-                        return;
-                    }
-
-                    long id = rxCounter.incrementAndGet();
-                    logPacket("WS -> TUN", id, packet);
-                    writeToTun(currentSession, packet, id);
-                }
-
-                @Override
-                public void onClose(int code, String reason, boolean remote) {
-                    wsClosed.set(true);
-                    System.out.println("WS closed: code=" + code + " remote=" + remote + " reason=" + reason);
-                }
-
-                @Override
-                public void onError(Exception ex) {
-                    System.out.println("WS error: " + ex.getClass().getName() + ": " + ex.getMessage());
-                    ex.printStackTrace();
-                }
-            };
-
-            wsClient.connect();
-            if (!connected.await(10, TimeUnit.SECONDS)) {
-                throw new RuntimeException("WS connect timeout: " + SERVER_WS_URL);
-            }
-
-            tunToWs(session, wsClient);
+            startWsLoop(currentSession);
+            tunToWs(session);
 
         } finally {
-            if (wsClient != null) {
-                wsClient.close();
+            running.set(false);
+
+            WebSocketClient ws = wsRef.get();
+            if (ws != null) {
+                ws.close();
             }
 
             routeManager.stop();
@@ -143,12 +108,93 @@ public class Client {
         }
     }
 
-    private void tunToWs(Pointer session, WebSocketClient wsClient) throws Exception {
-        while (true) {
-            if (wsClosed.get()) {
-                throw new RuntimeException("WebSocket closed");
+    private void startWsLoop(Pointer session) {
+        Thread thread = new Thread(() -> {
+            while (running.get()) {
+                WebSocketClient ws = null;
+                try {
+                    CountDownLatch connected = new CountDownLatch(1);
+                    ws = createWsClient(session, connected);
+                    wsRef.set(ws);
+                    ws.connect();
+
+                    if (!connected.await(10, TimeUnit.SECONDS)) {
+                        System.out.println("WS connect timeout: " + SERVER_WS_URL);
+                        ws.close();
+                        Thread.sleep(1000);
+                        continue;
+                    }
+
+                    while (running.get() && ws.isOpen()) {
+                        Thread.sleep(200);
+                    }
+                } catch (Exception e) {
+                    System.out.println("WS loop error: " + e.getClass().getName() + ": " + e.getMessage());
+                } finally {
+                    if (ws != null) {
+                        ws.close();
+                    }
+                    wsRef.compareAndSet(ws, null);
+                }
+
+                if (running.get()) {
+                    try {
+                        System.out.println("WS reconnect in 1s");
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            }
+        }, "ws-reconnect-loop");
+
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private WebSocketClient createWsClient(Pointer session, CountDownLatch connected) throws Exception {
+        return new WebSocketClient(new URI(SERVER_WS_URL)) {
+            @Override
+            public void onOpen(ServerHandshake handshake) {
+                System.out.println("WS connected");
+                connected.countDown();
             }
 
+            @Override
+            public void onMessage(String message) {
+                System.out.println("WS text ignored: " + message);
+            }
+
+            @Override
+            public void onMessage(ByteBuffer bytes) {
+                byte[] packet = new byte[bytes.remaining()];
+                bytes.get(packet);
+
+                if (!isIpv4(packet)) {
+                    System.out.println("WS -> TUN skip non-ipv4 len=" + packet.length + " first=" + firstBytes(packet));
+                    return;
+                }
+
+                long id = rxCounter.incrementAndGet();
+                logPacket("WS -> TUN", id, packet);
+                writeToTun(session, packet, id);
+            }
+
+            @Override
+            public void onClose(int code, String reason, boolean remote) {
+                System.out.println("WS closed: code=" + code + " remote=" + remote + " reason=" + reason);
+            }
+
+            @Override
+            public void onError(Exception ex) {
+                System.out.println("WS error: " + ex.getClass().getName() + ": " + ex.getMessage());
+            }
+        };
+    }
+
+    private void tunToWs(Pointer session) throws Exception {
+        while (running.get()) {
             IntByReference size = new IntByReference();
             Pointer packet = Wintun.INSTANCE.WintunReceivePacket(session, size);
 
@@ -182,13 +228,18 @@ public class Client {
                 continue;
             }
 
-            if (!wsClient.isOpen()) {
-                throw new RuntimeException("WebSocket is not open");
+            WebSocketClient ws = wsRef.get();
+            if (ws == null || !ws.isOpen()) {
+                long id = dropCounter.incrementAndGet();
+                if (id <= LOG_FIRST_PACKETS || id % LOG_EVERY_PACKETS == 0) {
+                    System.out.println("TUN -> WS drop no-ws id=" + id + " len=" + data.length + " " + ipInfo(data));
+                }
+                continue;
             }
 
             long id = txCounter.incrementAndGet();
             logPacket("TUN -> WS", id, data);
-            wsClient.send(data);
+            ws.send(data);
         }
     }
 
