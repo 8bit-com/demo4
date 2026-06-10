@@ -1,10 +1,8 @@
 package com.example.demo;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.nio.charset.Charset;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.regex.*;
 
 public class RouteManager {
 
@@ -12,9 +10,7 @@ public class RouteManager {
     private final String adapterIp;
     private final String serverIp;
 
-    private String defaultGateway;
-    private int defaultMetric;
-    private int interfaceIndex;
+    private DefaultRoute oldDefault;
 
     public RouteManager(String adapterName, String adapterIp, String serverIp) {
         this.adapterName = adapterName;
@@ -23,118 +19,114 @@ public class RouteManager {
     }
 
     public void start() throws Exception {
-        DefaultRoute defaultRoute = findDefaultRoute();
-        defaultGateway = defaultRoute.gateway;
-        defaultMetric = defaultRoute.metric;
-        interfaceIndex = findWintunInterfaceIndex();
+        oldDefault = findDefaultRoute();
 
-        cleanupRoutesOnly();
-        restoreDefaultRoute();
+        run("netsh interface ipv4 set address name=\"" + adapterName + "\" static " + adapterIp + " 255.255.255.255");
+        run("netsh interface ipv4 set subinterface \"" + adapterName + "\" mtu=1200 store=active");
 
-        System.out.println("WINTUN ROUTE INTERFACE INDEX: " + interfaceIndex);
-        System.out.println("ORIGINAL DEFAULT ROUTE: 0.0.0.0/0 via " + defaultGateway + " metric " + defaultMetric);
+        // сервер VPN оставить через обычный интернет
+        runIgnore("route delete " + serverIp);
+        run("route add " + serverIp + " mask 255.255.255.255 " + oldDefault.gateway + " metric 1");
 
-        runCmd("netsh interface ipv4 set address name=" + interfaceIndex + " static " + adapterIp + " 255.255.255.255");
-        runCmdIgnoreError("route delete " + serverIp);
-        runCmd("route add " + serverIp + " mask 255.255.255.255 " + defaultGateway + " metric 1");
-        runCmd("netsh interface ipv4 set subinterface " + interfaceIndex + " mtu=1200 store=active");
+        // удалить обычный default
+        runIgnore("route delete 0.0.0.0");
 
-        addDefaultVpnRoute("0.0.0.0", "128.0.0.0");
-        addDefaultVpnRoute("128.0.0.0", "128.0.0.0");
+        // поставить default через Wintun по имени адаптера
+        ps("New-NetRoute -DestinationPrefix '0.0.0.0/0' " +
+                "-InterfaceAlias '" + adapterName + "' " +
+                "-NextHop '0.0.0.0' " +
+                "-RouteMetric 1 " +
+                "-PolicyStore ActiveStore");
 
-        runCmd("route print -4");
+        run("route print -4");
     }
 
     public void stop() {
-        cleanupRoutesOnly();
-        restoreDefaultRoute();
-    }
+        // удалить VPN default
+        psIgnore("Remove-NetRoute -DestinationPrefix '0.0.0.0/0' " +
+                "-InterfaceAlias '" + adapterName + "' " +
+                "-NextHop '0.0.0.0' " +
+                "-Confirm:$false");
 
-    private void addDefaultVpnRoute(String network, String mask) throws Exception {
-        deleteSplitRoute(network, mask);
-        runCmd("route add " + network + " mask " + mask + " 0.0.0.0 metric 1 if " + interfaceIndex);
-    }
+        runIgnore("route delete 0.0.0.0");
 
-    private void cleanupRoutesOnly() {
-        deleteSplitRoute("0.0.0.0", "128.0.0.0");
-        deleteSplitRoute("128.0.0.0", "128.0.0.0");
-        runCmdIgnoreError("route delete " + serverIp);
-    }
-
-    private void deleteSplitRoute(String network, String mask) {
-        if (interfaceIndex > 0) {
-            runCmdIgnoreError("netsh interface ipv4 delete route prefix=" + network + "/1 interface=" + interfaceIndex);
-        }
-        runCmdIgnoreError("netsh interface ipv4 delete route prefix=" + network + "/1 interface=\"" + adapterName + "\"");
-        runCmdIgnoreError("route delete " + network + " mask " + mask);
-    }
-
-    private void restoreDefaultRoute() {
-        if (defaultGateway == null) {
-            return;
+        // вернуть старый default
+        if (oldDefault != null) {
+            runIgnore("route add 0.0.0.0 mask 0.0.0.0 " +
+                    oldDefault.gateway + " metric " + oldDefault.metric);
         }
 
-        runCmdIgnoreError("route add 0.0.0.0 mask 0.0.0.0 " + defaultGateway + " metric " + defaultMetric);
+        // удалить маршрут до сервера
+        runIgnore("route delete " + serverIp);
+
+        runIgnore("route print -4");
     }
 
     private DefaultRoute findDefaultRoute() throws Exception {
-        String output = runCmd("route print -4");
+        String out = run("route print -4");
 
-        Pattern pattern = Pattern.compile(
-                "^\\s*0\\.0\\.0\\.0\\s+0\\.0\\.0\\.0\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+(\\d+)\\s*$",
+        Pattern p = Pattern.compile(
+                "^\\s*0\\.0\\.0\\.0\\s+0\\.0\\.0\\.0\\s+" +
+                        "(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+" +
+                        "(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+" +
+                        "(\\d+)\\s*$",
                 Pattern.MULTILINE
         );
 
-        Matcher matcher = pattern.matcher(output);
-        if (!matcher.find()) {
-            throw new RuntimeException("Не найден обычный default gateway. Восстанови интернет вручную: route add 0.0.0.0 mask 0.0.0.0 <адрес_роутера>");
+        Matcher m = p.matcher(out);
+        if (!m.find()) {
+            throw new RuntimeException("Не найден старый default route");
         }
 
-        return new DefaultRoute(matcher.group(1), Integer.parseInt(matcher.group(3)));
+        return new DefaultRoute(m.group(1), Integer.parseInt(m.group(3)));
     }
 
-    private int findWintunInterfaceIndex() throws Exception {
-        String output = runCmd("powershell -NoProfile -Command \"Get-NetAdapter -IncludeHidden | Where-Object { $_.InterfaceDescription -like '*Wintun*' -or $_.Name -eq '" + adapterName + "' } | Sort-Object ifIndex -Descending | Select-Object -First 1 -ExpandProperty ifIndex\"");
-        String trimmed = output.trim();
-        if (trimmed.isEmpty()) {
-            throw new RuntimeException("Не найден Wintun/MyVPN интерфейс");
+    private void ps(String command) throws Exception {
+        run("powershell -NoProfile -ExecutionPolicy Bypass -Command \"" + command + "\"");
+    }
+
+    private void psIgnore(String command) {
+        try {
+            ps(command);
+        } catch (Exception ignored) {
         }
-        return Integer.parseInt(trimmed.split("\\R")[trimmed.split("\\R").length - 1].trim());
     }
 
-    private String runCmd(String command) throws Exception {
+    private String run(String command) throws Exception {
         System.out.println("RUN: " + command);
 
-        Process process = new ProcessBuilder("cmd.exe", "/c", command)
+        Process p = new ProcessBuilder("cmd.exe", "/c", command)
                 .redirectErrorStream(true)
                 .start();
 
-        StringBuilder output = new StringBuilder();
+        StringBuilder out = new StringBuilder();
 
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), Charset.forName("CP866")))) {
+        try (BufferedReader r = new BufferedReader(
+                new InputStreamReader(p.getInputStream(), Charset.forName("CP866"))
+        )) {
             String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append('\n');
+            while ((line = r.readLine()) != null) {
+                out.append(line).append('\n');
             }
         }
 
-        int code = process.waitFor();
-        String result = output.toString();
+        int code = p.waitFor();
+        String result = out.toString();
 
         if (!result.isBlank()) {
             System.out.println(result);
         }
 
         if (code != 0) {
-            throw new RuntimeException("Command failed, code=" + code + "\ncmd=" + command + "\n" + result);
+            throw new RuntimeException("Command failed: " + command + "\n" + result);
         }
 
         return result;
     }
 
-    private void runCmdIgnoreError(String command) {
+    private void runIgnore(String command) {
         try {
-            runCmd(command);
+            run(command);
         } catch (Exception ignored) {
         }
     }
