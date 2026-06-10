@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -92,7 +93,7 @@ public class Client {
                     bytes.get(packet);
 
                     if (!isIpv4(packet)) {
-                        System.out.println("WS -> TUN skip non-ipv4 len=" + packet.length);
+                        System.out.println("WS -> TUN skip non-ipv4 len=" + packet.length + " first=" + firstBytes(packet));
                         return;
                     }
 
@@ -159,8 +160,10 @@ public class Client {
                 Wintun.INSTANCE.WintunReleaseReceivePacket(session, packet);
             }
 
+            data = normalizeWintunPacket(data);
+
             if (!isIpv4(data) || data.length > MAX_PACKET_SIZE) {
-                System.out.println("TUN -> WS skip invalid packet len=" + data.length);
+                System.out.println("TUN -> WS skip invalid packet len=" + data.length + " first=" + firstBytes(data));
                 continue;
             }
 
@@ -172,6 +175,22 @@ public class Client {
             logPacket("TUN -> WS", id, data);
             wsClient.send(data);
         }
+    }
+
+    private byte[] normalizeWintunPacket(byte[] data) {
+        if (isIpv4(data)) {
+            return data;
+        }
+
+        if (data.length > 4 && isIpv4At(data, 4)) {
+            return Arrays.copyOfRange(data, 4, data.length);
+        }
+
+        if (data.length > 14 && isIpv4At(data, 14)) {
+            return Arrays.copyOfRange(data, 14, data.length);
+        }
+
+        return data;
     }
 
     private void writeToTun(Pointer session, byte[] data, long id) {
@@ -193,7 +212,11 @@ public class Client {
     }
 
     private boolean isIpv4(byte[] packet) {
-        return packet.length >= 20 && ((packet[0] >> 4) & 0x0F) == 4;
+        return isIpv4At(packet, 0);
+    }
+
+    private boolean isIpv4At(byte[] packet, int offset) {
+        return packet.length >= offset + 20 && ((packet[offset] >> 4) & 0x0F) == 4;
     }
 
     private String ipInfo(byte[] packet) {
@@ -209,5 +232,17 @@ public class Client {
                 (data[offset + 1] & 0xff) + "." +
                 (data[offset + 2] & 0xff) + "." +
                 (data[offset + 3] & 0xff);
+    }
+
+    private String firstBytes(byte[] data) {
+        StringBuilder sb = new StringBuilder();
+        int len = Math.min(data.length, 16);
+        for (int i = 0; i < len; i++) {
+            if (i > 0) {
+                sb.append(' ');
+            }
+            sb.append(String.format("%02x", data[i] & 0xff));
+        }
+        return sb.toString();
     }
 }
