@@ -115,6 +115,7 @@ public class Client {
                 try {
                     CountDownLatch connected = new CountDownLatch(1);
                     ws = createWsClient(session, connected);
+                    ws.setConnectionLostTimeout(0);
                     wsRef.set(ws);
                     ws.connect();
 
@@ -157,7 +158,8 @@ public class Client {
         return new WebSocketClient(new URI(SERVER_WS_URL)) {
             @Override
             public void onOpen(ServerHandshake handshake) {
-                System.out.println("WS connected");
+                setConnectionLostTimeout(0);
+                System.out.println("WS connected connectionLostTimeout=0");
                 connected.countDown();
             }
 
