@@ -29,6 +29,7 @@ public class RouteManager {
     private final String serverIp;
 
     private String defaultGateway;
+    private int interfaceIndex;
     private final Set<String> routedIps = new LinkedHashSet<>();
 
     public RouteManager(String adapterName, String adapterIp, String serverIp) {
@@ -41,29 +42,14 @@ public class RouteManager {
         cleanupRoutesOnly();
 
         defaultGateway = findDefaultGateway();
+        interfaceIndex = findWintunInterfaceIndex();
 
-        runCmd(
-                "netsh interface ipv4 set address " +
-                        "name=\"" + adapterName + "\" " +
-                        "static " +
-                        adapterIp + " " +
-                        "255.255.255.255"
-        );
+        System.out.println("WINTUN ROUTE INTERFACE INDEX: " + interfaceIndex);
 
+        runCmd("netsh interface ipv4 set address interface=" + interfaceIndex + " static " + adapterIp + " 255.255.255.255");
         runCmdIgnoreError("route delete " + serverIp);
-
-        runCmd(
-                "route add " + serverIp +
-                        " mask 255.255.255.255 " +
-                        defaultGateway +
-                        " metric 1"
-        );
-
-        runCmd(
-                "netsh interface ipv4 set subinterface " +
-                        "\"" + adapterName + "\" " +
-                        "mtu=1400 store=active"
-        );
+        runCmd("route add " + serverIp + " mask 255.255.255.255 " + defaultGateway + " metric 1");
+        runCmd("netsh interface ipv4 set subinterface " + interfaceIndex + " mtu=1400 store=active");
 
         List<String> ips = resolveVpnIps();
         if (ips.isEmpty()) {
@@ -103,52 +89,30 @@ public class RouteManager {
     }
 
     private void addVpnRoute(String ip) throws Exception {
-        runCmdIgnoreError(
-                "netsh interface ipv4 delete route " +
-                        "prefix=" + ip + "/32 " +
-                        "interface=\"" + adapterName + "\""
-        );
-
-        runCmd(
-                "netsh interface ipv4 add route " +
-                        "prefix=" + ip + "/32 " +
-                        "interface=\"" + adapterName + "\" " +
-                        "nexthop=0.0.0.0 " +
-                        "metric=1 " +
-                        "store=active"
-        );
-
+        deleteVpnRoute(ip);
+        runCmd("route add " + ip + " mask 255.255.255.255 0.0.0.0 metric 1 if " + interfaceIndex);
         routedIps.add(ip);
     }
 
-    private void cleanupRoutesOnly() {
-        runCmdIgnoreError(
-                "netsh interface ipv4 delete route " +
-                        "prefix=0.0.0.0/1 " +
-                        "interface=\"" + adapterName + "\""
-        );
+    private void deleteVpnRoute(String ip) {
+        runCmdIgnoreError("route delete " + ip);
+        if (interfaceIndex > 0) {
+            runCmdIgnoreError("netsh interface ipv4 delete route prefix=" + ip + "/32 interface=" + interfaceIndex);
+        }
+        runCmdIgnoreError("netsh interface ipv4 delete route prefix=" + ip + "/32 interface=\"" + adapterName + "\"");
+    }
 
-        runCmdIgnoreError(
-                "netsh interface ipv4 delete route " +
-                        "prefix=128.0.0.0/1 " +
-                        "interface=\"" + adapterName + "\""
-        );
+    private void cleanupRoutesOnly() {
+        runCmdIgnoreError("netsh interface ipv4 delete route prefix=0.0.0.0/1 interface=\"" + adapterName + "\"");
+        runCmdIgnoreError("netsh interface ipv4 delete route prefix=128.0.0.0/1 interface=\"" + adapterName + "\"");
 
         for (String ip : routedIps) {
-            runCmdIgnoreError(
-                    "netsh interface ipv4 delete route " +
-                            "prefix=" + ip + "/32 " +
-                            "interface=\"" + adapterName + "\""
-            );
+            deleteVpnRoute(ip);
         }
         routedIps.clear();
 
         for (String domainIp : resolveVpnIpsQuietly()) {
-            runCmdIgnoreError(
-                    "netsh interface ipv4 delete route " +
-                            "prefix=" + domainIp + "/32 " +
-                            "interface=\"" + adapterName + "\""
-            );
+            deleteVpnRoute(domainIp);
         }
 
         runCmdIgnoreError("route delete " + serverIp);
@@ -181,12 +145,20 @@ public class RouteManager {
         );
 
         Matcher matcher = pattern.matcher(output);
-
         if (!matcher.find()) {
             throw new RuntimeException("Не найден обычный default gateway");
         }
 
         return matcher.group(1);
+    }
+
+    private int findWintunInterfaceIndex() throws Exception {
+        String output = runCmd("powershell -NoProfile -Command \"Get-NetAdapter -IncludeHidden | Where-Object { $_.InterfaceDescription -like '*Wintun*' -or $_.Name -eq '" + adapterName + "' } | Sort-Object ifIndex -Descending | Select-Object -First 1 -ExpandProperty ifIndex\"");
+        String trimmed = output.trim();
+        if (trimmed.isEmpty()) {
+            throw new RuntimeException("Не найден Wintun/MyVPN интерфейс");
+        }
+        return Integer.parseInt(trimmed.split("\\R")[trimmed.split("\\R").length - 1].trim());
     }
 
     private String runCmd(String command) throws Exception {
@@ -198,12 +170,7 @@ public class RouteManager {
 
         StringBuilder output = new StringBuilder();
 
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(
-                        process.getInputStream(),
-                        Charset.forName("CP866")
-                )
-        )) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), Charset.forName("CP866")))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 output.append(line).append('\n');
@@ -218,11 +185,7 @@ public class RouteManager {
         }
 
         if (code != 0) {
-            throw new RuntimeException(
-                    "Command failed, code=" + code +
-                            "\ncmd=" + command +
-                            "\n" + result
-            );
+            throw new RuntimeException("Command failed, code=" + code + "\ncmd=" + command + "\n" + result);
         }
 
         return result;
