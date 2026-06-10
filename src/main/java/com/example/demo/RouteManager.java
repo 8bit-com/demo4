@@ -22,10 +22,10 @@ public class RouteManager {
     }
 
     public void start() throws Exception {
-        cleanupRoutesOnly();
-
         defaultGateway = findDefaultGateway();
         interfaceIndex = findWintunInterfaceIndex();
+
+        cleanupRoutesOnly();
 
         System.out.println("WINTUN ROUTE INTERFACE INDEX: " + interfaceIndex);
 
@@ -45,15 +45,17 @@ public class RouteManager {
     }
 
     private void addDefaultVpnRoute(String network, String mask) throws Exception {
+        runCmdIgnoreError("netsh interface ipv4 delete route prefix=" + network + "/1 interface=" + interfaceIndex);
+        runCmdIgnoreError("netsh interface ipv4 delete route prefix=" + network + "/1 interface=\"" + adapterName + "\"");
         runCmdIgnoreError("route delete " + network);
         runCmd("route add " + network + " mask " + mask + " 0.0.0.0 metric 1 if " + interfaceIndex);
     }
 
     private void cleanupRoutesOnly() {
-        runCmdIgnoreError("route delete 0.0.0.0");
-        runCmdIgnoreError("route delete 128.0.0.0");
-        runCmdIgnoreError("netsh interface ipv4 delete route prefix=0.0.0.0/1 interface=" + interfaceIndex);
-        runCmdIgnoreError("netsh interface ipv4 delete route prefix=128.0.0.0/1 interface=" + interfaceIndex);
+        if (interfaceIndex > 0) {
+            runCmdIgnoreError("netsh interface ipv4 delete route prefix=0.0.0.0/1 interface=" + interfaceIndex);
+            runCmdIgnoreError("netsh interface ipv4 delete route prefix=128.0.0.0/1 interface=" + interfaceIndex);
+        }
         runCmdIgnoreError("netsh interface ipv4 delete route prefix=0.0.0.0/1 interface=\"" + adapterName + "\"");
         runCmdIgnoreError("netsh interface ipv4 delete route prefix=128.0.0.0/1 interface=\"" + adapterName + "\"");
         runCmdIgnoreError("route delete " + serverIp);
