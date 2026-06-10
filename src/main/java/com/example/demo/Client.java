@@ -173,8 +173,10 @@ public class Client {
                 byte[] packet = new byte[bytes.remaining()];
                 bytes.get(packet);
 
-                if (!isIpv4(packet)) {
-                    System.out.println("WS -> TUN skip non-ipv4 len=" + packet.length + " first=" + firstBytes(packet));
+                packet = normalizeWintunPacket(packet);
+
+                if (!isIpPacket(packet)) {
+                    System.out.println("WS -> TUN skip non-ip len=" + packet.length + " first=" + firstBytes(packet));
                     return;
                 }
 
@@ -214,7 +216,7 @@ public class Client {
 
             data = normalizeWintunPacket(data);
 
-            if (!isIpv4(data) || data.length > MAX_PACKET_SIZE) {
+            if (!isIpPacket(data) || data.length > MAX_PACKET_SIZE) {
                 long id = dropCounter.incrementAndGet();
                 if (id <= LOG_FIRST_PACKETS || id % LOG_EVERY_PACKETS == 0) {
                     System.out.println("TUN -> WS drop invalid id=" + id + " len=" + data.length + " first=" + firstBytes(data));
@@ -246,10 +248,14 @@ public class Client {
     }
 
     private boolean shouldTunnel(byte[] packet) {
+        if (isIpv6(packet)) {
+            return true;
+        }
+
         int d0 = packet[16] & 0xff;
         int d1 = packet[17] & 0xff;
 
-        if (d0 == 0 || d0 == 10 || d0 == 127 || d0 >= 224) {
+        if (d0 == 0 || d0 == 127 || d0 >= 224) {
             return false;
         }
 
@@ -257,27 +263,19 @@ public class Client {
             return false;
         }
 
-        if (d0 == 172 && d1 >= 16 && d1 <= 31) {
-            return false;
-        }
-
-        if (d0 == 192 && d1 == 168) {
-            return false;
-        }
-
         return true;
     }
 
     private byte[] normalizeWintunPacket(byte[] data) {
-        if (isIpv4(data)) {
+        if (isIpPacket(data)) {
             return data;
         }
 
-        if (data.length > 4 && isIpv4At(data, 4)) {
+        if (data.length > 4 && isIpPacketAt(data, 4)) {
             return Arrays.copyOfRange(data, 4, data.length);
         }
 
-        if (data.length > 14 && isIpv4At(data, 14)) {
+        if (data.length > 14 && isIpPacketAt(data, 14)) {
             return Arrays.copyOfRange(data, 14, data.length);
         }
 
@@ -302,27 +300,62 @@ public class Client {
         }
     }
 
-    private boolean isIpv4(byte[] packet) {
-        return isIpv4At(packet, 0);
+    private boolean isIpPacket(byte[] packet) {
+        return isIpPacketAt(packet, 0);
     }
 
-    private boolean isIpv4At(byte[] packet, int offset) {
-        return packet.length >= offset + 20 && ((packet[offset] >> 4) & 0x0F) == 4;
+    private boolean isIpPacketAt(byte[] packet, int offset) {
+        if (packet.length <= offset) {
+            return false;
+        }
+
+        int version = (packet[offset] >> 4) & 0x0F;
+        if (version == 4) {
+            return packet.length >= offset + 20;
+        }
+        if (version == 6) {
+            return packet.length >= offset + 40;
+        }
+        return false;
+    }
+
+    private boolean isIpv4(byte[] packet) {
+        return packet.length >= 20 && ((packet[0] >> 4) & 0x0F) == 4;
+    }
+
+    private boolean isIpv6(byte[] packet) {
+        return packet.length >= 40 && ((packet[0] >> 4) & 0x0F) == 6;
     }
 
     private String ipInfo(byte[] packet) {
-        if (packet.length < 20) {
-            return "";
+        if (isIpv4(packet)) {
+            return ipv4(packet, 12) + " -> " + ipv4(packet, 16) + " proto=" + (packet[9] & 0xff);
         }
 
-        return ip(packet, 12) + " -> " + ip(packet, 16) + " proto=" + (packet[9] & 0xff);
+        if (isIpv6(packet)) {
+            return ipv6(packet, 8) + " -> " + ipv6(packet, 24) + " nextHeader=" + (packet[6] & 0xff);
+        }
+
+        return "non-ip len=" + packet.length;
     }
 
-    private String ip(byte[] data, int offset) {
+    private String ipv4(byte[] data, int offset) {
         return (data[offset] & 0xff) + "." +
                 (data[offset + 1] & 0xff) + "." +
                 (data[offset + 2] & 0xff) + "." +
                 (data[offset + 3] & 0xff);
+    }
+
+    private String ipv6(byte[] data, int offset) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 16; i += 2) {
+            if (i > 0) {
+                sb.append(':');
+            }
+            int value = ((data[offset + i] & 0xff) << 8) | (data[offset + i + 1] & 0xff);
+            sb.append(Integer.toHexString(value));
+        }
+        return sb.toString();
     }
 
     private String firstBytes(byte[] data) {
